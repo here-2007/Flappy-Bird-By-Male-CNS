@@ -180,13 +180,33 @@ def main():
                         help="Skip neuron fetch if neurons.csv already exists")
     parser.add_argument("--skip-connections", action="store_true",
                         help="Skip connection fetch if connections.npz exists")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-download even if cache already exists")
     args = parser.parse_args()
+
+    # If data is already fully downloaded and not --force, skip immediately
+    if os.path.exists(CFG.NEURON_CSV) and os.path.exists(CFG.CONN_NPZ) and not args.force:
+        print("[cache] Both neurons.csv and connections.npz already exist in cache.")
+        print("        To re-download from scratch, pass --force.")
+        print("[done] Data is ready! Run: python run.py")
+        return
 
     if args.token == "PASTE_YOUR_TOKEN_HERE":
         raise ValueError(
             "Set NEUPRINT_TOKEN env var or pass --token.\n"
             "Get your token at https://neuprint.janelia.org (login → Account)"
         )
+
+    # Pre-seed Client.DATASETS_CACHE to bypass Janelia's intermittent 500 error on /api/dbmeta/datasets
+    server = CFG.NEUPRINT_SERVER.rstrip("/")
+    datasets_map = {
+        CFG.NEUPRINT_DATASET: {"uuid": CFG.NEUPRINT_DATASET},
+        "male-cns:v1.0": {"uuid": "male-cns:v1.0"},
+        "male-cns:v0.9": {"uuid": "male-cns:v0.9"},
+        "hemibrain:v1.2.1": {"uuid": "hemibrain:v1.2.1"},
+    }
+    Client.DATASETS_CACHE[server] = datasets_map
+    Client.DATASETS_CACHE[server + "/"] = datasets_map
 
     client = Client(
         CFG.NEUPRINT_SERVER,
@@ -196,17 +216,18 @@ def main():
     print(f"[neuPrint] Connected to {CFG.NEUPRINT_SERVER} / {CFG.NEUPRINT_DATASET}")
 
     # ── Neurons ──
-    if args.skip_neurons and os.path.exists(CFG.NEURON_CSV):
+    if (args.skip_neurons or not args.force) and os.path.exists(CFG.NEURON_CSV):
         print(f"[skip] Loading cached {CFG.NEURON_CSV}")
-        neuron_df = pd.read_csv(CFG.NEURON_CSV)
+        neuron_df = pd.read_csv(CFG.NEURON_CSV, low_memory=False)
     else:
         neuron_df = fetch_all_neurons(client)
         neuron_df.to_csv(CFG.NEURON_CSV, index=False)
         print(f"[cache] Saved {CFG.NEURON_CSV}")
 
     # ── Connections ──
-    if args.skip_connections and os.path.exists(CFG.CONN_NPZ):
+    if (args.skip_connections or not args.force) and os.path.exists(CFG.CONN_NPZ):
         print(f"[skip] {CFG.CONN_NPZ} already exists.")
+        print("[done] Data ready. Run: python run.py")
         return
 
     conn_df = fetch_connections_paged(client, min_weight=args.min_weight)
