@@ -55,6 +55,8 @@ def parse_args():
                         "instead of full frame rendering")
     p.add_argument("--device", type=str, default=None,
                    help="Execution device ('cuda', 'mps', 'cpu', or auto-detect)")
+    p.add_argument("--num-gpus", type=int, default=None,
+                   help="Number of GPUs to use for parallel multi-GPU training (e.g. 2 on Kaggle)")
     return p.parse_args()
 
 
@@ -70,6 +72,182 @@ def kaggle_bar(ep: int, total_ep: int, score: int, best: int, fps: float) -> Non
     )
 
 
+def _worker_process(
+    rank: int,
+    gpu_id: int,
+    episode_list: list[int],
+    mock: bool,
+    no_viz: bool,
+    viz_interval: int,
+    save_weights: bool,
+    structured_encoder: bool,
+    result_dict: dict,
+):
+    """Worker process executing simulation episodes on a dedicated GPU."""
+    import torch
+    import config as CFG
+    from simulation.lif import LIFEngine
+    from simulation.sensory import SensoryEncoder
+    from simulation.motor import MotorDecoder
+    from simulation.plasticity import PPL101Plasticity
+    from game.flappy import FlappyBird
+    from connectome.builder import load_connectome
+    import scipy.sparse as sp
+
+    target_device = torch.device(f"cuda:{gpu_id}")
+    torch.cuda.set_device(target_device)
+
+    # 1. Load connectome
+    if mock:
+        from data.mock_data import get_or_create_mock_connectome
+        W_t, W_scipy, neuron_df, pop, coords = get_or_create_mock_connectome(device=target_device)
+        N = len(neuron_df)
+    else:
+        W_t, neuron_df, pop, coords = load_connectome(device=target_device)
+        N = len(neuron_df)
+        W_scipy = sp.load_npz(CFG.CONN_NPZ)
+        from connectome.builder import _nt_sign_vector
+        nt_sign = _nt_sign_vector(neuron_df)
+        W_coo = W_scipy.tocoo().astype(np.float32)
+        W_coo.data *= nt_sign[W_coo.col] * CFG.WEIGHT_SCALE
+        np.clip(W_coo.data, CFG.W_MIN, CFG.W_MAX, out=W_coo.data)
+        W_scipy = W_coo.tocsr()
+
+    engine = LIFEngine(W=W_t, N=N, device=target_device)
+    encoder = SensoryEncoder(pop.photoreceptors_R1_R6, coords, N=N, device=target_device)
+    decoder = MotorDecoder(pop.wing_motor, N=N, device=target_device)
+    plasticity = PPL101Plasticity(W_scipy, pop.ppl101, pop.kenyon_cells, N=N, device=target_device)
+    game = FlappyBird()
+
+    observed = []
+    for _ in range(3):
+        engine.reset()
+        for _ in range(CFG.LIF_STEPS_PER_FRAME):
+            engine.step(torch.randn(N, device=target_device) * 0.05)
+        observed.extend(engine.spike_rates(pop.wing_motor).tolist())
+    decoder.calibrate_threshold(observed)
+
+    best_score = 0
+    total_frames = 0
+    t0 = time.time()
+
+    for ep in episode_list:
+        game.reset(seed=ep)
+        engine.reset()
+        frame_count = 0
+        da_signal = 0.0
+        while game.state.alive and frame_count < CFG.MAX_FRAMES_PER_EP:
+            frame_count += 1
+            frame_gray, _ = game.render()
+            if structured_encoder:
+                s = game.state
+                I_ext = encoder.encode_structured(s.bird_y_norm, s.gap_center_norm, s.pipe_dist_norm, s.bird_vy_norm)
+            else:
+                I_ext = encoder.encode(frame_gray)
+
+            engine.clear_spike_accumulator()
+            for _ in range(CFG.LIF_STEPS_PER_FRAME):
+                spikes = engine.step(I_ext)
+                plasticity.step(spikes, da_signal)
+
+            flap = decoder.decode(engine.spike_history_sum, engine._step_count)
+            reward = game.step(flap)
+            da_signal = reward
+
+        score = game.state.score
+        if score > best_score:
+            best_score = score
+        W_t = plasticity.apply_updates(W_t)
+        engine.W = W_t
+        total_frames += frame_count
+        fps = total_frames / max(time.time() - t0, 1e-6)
+        print(f"  [GPU {gpu_id}] Episode {ep:3d} finished | Score: {score:2d} | Best: {best_score:2d} | Speed: {fps:.1f} fps")
+
+    result_dict[rank] = {
+        "gpu_id": gpu_id,
+        "best_score": best_score,
+        "episodes_done": len(episode_list),
+        "total_frames": total_frames,
+        "elapsed": time.time() - t0,
+    }
+
+
+def run_multi_gpu(
+    episodes: int,
+    num_gpus: int,
+    mock: bool = False,
+    no_viz: bool = True,
+    viz_interval: int = CFG.VIZ_EVERY_N_FRAMES,
+    save_weights: bool = False,
+    structured_encoder: bool = False,
+) -> dict:
+    """Run parallel episode rollouts across multiple GPUs simultaneously."""
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
+    print("=" * 60)
+    print("  FlyFlappyBird — Multi-GPU Parallel Connectome Simulation")
+    print(f"  Distributing {episodes} episodes across {num_gpus} NVIDIA GPUs in parallel!")
+    for g in range(num_gpus):
+        print(f"    GPU {g}: {torch.cuda.get_device_name(g)}")
+    print("=" * 60)
+
+    episode_ids = list(range(1, episodes + 1))
+    chunks = [episode_ids[i::num_gpus] for i in range(num_gpus)]
+
+    manager = mp.Manager()
+    result_dict = manager.dict()
+    processes = []
+
+    t_start = time.time()
+    for rank in range(num_gpus):
+        p = mp.Process(
+            target=_worker_process,
+            args=(
+                rank,
+                rank,
+                chunks[rank],
+                mock,
+                no_viz,
+                viz_interval,
+                save_weights,
+                structured_encoder,
+                result_dict,
+            ),
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    total_time = time.time() - t_start
+    overall_best = max([r["best_score"] for r in result_dict.values()] or [0])
+    total_frames = sum([r["total_frames"] for r in result_dict.values()] or [0])
+    combined_fps = total_frames / max(total_time, 1e-6)
+
+    print("\n" + "=" * 60)
+    print(f"  Multi-GPU Simulation Complete across {num_gpus} GPUs!")
+    print(f"  Total wallclock time:  {total_time:.1f}s")
+    print(f"  Total frames computed: {total_frames}")
+    print(f"  Combined throughput:   {combined_fps:.1f} frames/sec across all GPUs")
+    print(f"  Overall Best Score:     {overall_best}")
+    print("=" * 60)
+
+    return {
+        "best_score": overall_best,
+        "episodes": episodes,
+        "num_gpus": num_gpus,
+        "combined_fps": combined_fps,
+        "wallclock_time": total_time,
+        "video_path": None,
+        "weights_path": None,
+    }
+
+
 def run_simulation(
     episodes: int = CFG.MAX_EPISODES,
     mock: bool = False,
@@ -79,11 +257,28 @@ def run_simulation(
     save_weights: bool = False,
     structured_encoder: bool = False,
     device: Optional[Union[str, torch.device]] = None,
+    num_gpus: Optional[int] = None,
 ) -> dict:
     """
     Run FlyFlappyBird simulation programmatically.
     Works seamlessly both in CLI scripts and Kaggle / Jupyter notebooks.
+    Auto-detects and uses multi-GPU if multiple CUDA accelerators are present.
     """
+    # Auto-detect multi-GPU if available and multiple episodes requested
+    if num_gpus is None and torch.cuda.is_available() and torch.cuda.device_count() > 1 and episodes > 1 and device is None:
+        num_gpus = torch.cuda.device_count()
+
+    if num_gpus and num_gpus > 1 and torch.cuda.is_available() and torch.cuda.device_count() > 1 and episodes > 1:
+        return run_multi_gpu(
+            episodes=episodes,
+            num_gpus=min(num_gpus, torch.cuda.device_count()),
+            mock=mock,
+            no_viz=no_viz,
+            viz_interval=viz_interval,
+            save_weights=save_weights,
+            structured_encoder=structured_encoder,
+        )
+
     active_device = CFG.resolve_device(device)
 
     print("=" * 60)
@@ -306,6 +501,7 @@ def main():
         save_weights=args.save_weights,
         structured_encoder=args.structured_encoder,
         device=args.device,
+        num_gpus=args.num_gpus,
     )
 
 

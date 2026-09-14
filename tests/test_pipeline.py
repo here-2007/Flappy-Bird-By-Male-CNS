@@ -73,3 +73,20 @@ def test_end_to_end_mock():
                          capture_output=True, text=True, env=env, cwd=env["PYTHONPATH"])
     assert res.returncode == 0, f"Error running run.py:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
     assert "Training complete" in res.stdout
+
+
+def test_end_to_end_mock_num_gpus_cli():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    res = subprocess.run([sys.executable, "run.py", "--mock", "--episodes", "1", "--no-viz", "--num-gpus", "2"], 
+                         capture_output=True, text=True, env=env, cwd=env["PYTHONPATH"])
+    assert res.returncode == 0, f"Error running run.py with --num-gpus:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    assert "Training complete" in res.stdout or "Simulation Complete" in res.stdout
+
+
+def test_run_simulation_api_num_gpus():
+    from run import run_simulation
+    res = run_simulation(episodes=1, mock=True, no_viz=True, num_gpus=2)
+    assert res["episodes"] >= 1
+    assert "best_score" in res
+
