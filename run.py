@@ -23,6 +23,7 @@ import time
 import argparse
 import numpy as np
 import scipy.sparse as sp
+from typing import Optional, Union
 import torch
 
 # ── Project imports ──────────────────────────────────────────────────────────
