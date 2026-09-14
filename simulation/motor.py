@@ -90,9 +90,8 @@ class MotorDecoder:
         Auto-calibrate threshold to 50th percentile of observed rates.
         Call this after a few random-input warm-up episodes.
         """
-        if not observed_rates or max(observed_rates) <= 0.0:
+        if not observed_rates:
             return
         new_thresh = float(np.percentile(observed_rates, 50))
-        if new_thresh > 0.0:
-            print(f"[MotorDecoder] Calibrated threshold: {self.threshold:.4f} → {new_thresh:.4f}")
-            self.threshold = new_thresh
+        print(f"[MotorDecoder] Calibrated threshold: {self.threshold:.4f} → {new_thresh:.4f}")
+        self.threshold = new_thresh

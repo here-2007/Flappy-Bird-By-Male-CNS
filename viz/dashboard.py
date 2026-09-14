@@ -80,18 +80,14 @@ class Dashboard:
         self._setup_neural_panel()
         plt.tight_layout(rect=[0, 0, 1, 0.94])
 
+        # Video writer
         self._writer: Optional[FFMpegWriter] = None
-        self.video_saved = False
-        self._saved_frame_count = 0
         if video_path:
-            if FFMpegWriter.isAvailable():
-                try:
-                    self._writer = FFMpegWriter(fps=15, metadata={"title": "FlyFlappyBird"})
-                    self._writer.setup(self._fig, video_path, dpi=dpi)
-                except Exception as e:
-                    print(f"[dashboard] Video writer setup error ({e}). Will export animated GIF.")
-                    self._writer = None
-            else:
+            try:
+                self._writer = FFMpegWriter(fps=15, metadata={"title": "FlyFlappyBird"})
+                self._writer.setup(self._fig, video_path, dpi=dpi)
+            except Exception as e:
+                print(f"[dashboard] Video writer unavailable ({e}). Saving frames as PNGs.")
                 self._writer = None
 
         # Episode history (for score line)
@@ -219,31 +215,25 @@ class Dashboard:
         # Capture frame
         if self._writer:
             self._writer.grab_frame()
-            self._saved_frame_count += 1
         else:
             # Fall back to saving individual PNGs if ffmpeg unavailable
             buf = io.BytesIO()
             self._fig.savefig(buf, format="png", dpi=self.dpi, facecolor="#0d0d0d")
             buf.seek(0)
             self._frames.append(buf.getvalue())
-            self._saved_frame_count += 1
 
     # ── Kaggle inline display ─────────────────────────────────────────────
 
     def show_inline(self) -> None:
         """Display current figure in Kaggle notebook cell."""
         try:
-            from IPython import get_ipython
-            ip = get_ipython()
-            if ip is None or ip.__class__.__name__ != "ZMQInteractiveShell":
-                return
             from IPython.display import display, Image, clear_output
             buf = io.BytesIO()
             self._fig.savefig(buf, format="png", dpi=self.dpi, facecolor="#0d0d0d")
             buf.seek(0)
             clear_output(wait=True)
             display(Image(data=buf.read()))
-        except Exception:
+        except ImportError:
             pass   # not in a notebook; skip
 
     # ── Finalise ─────────────────────────────────────────────────────────
@@ -252,30 +242,11 @@ class Dashboard:
         """Finalise video and close figure."""
         if self._writer:
             self._writer.finish()
-            if self._saved_frame_count > 0:
-                self.video_saved = True
-                print(f"[dashboard] Video saved ({self._saved_frame_count} frames) → {self.video_path}")
-            else:
-                print(f"[dashboard] Warning: 0 frames recorded. Video not created.")
+            print(f"[dashboard] Video saved → {self.video_path}")
         elif self._frames and self.video_path:
-            # Fallback for environments without ffmpeg (e.g. basic Kaggle containers)
-            try:
-                from PIL import Image as PILImage
-                pil_frames = [PILImage.open(io.BytesIO(b)) for b in self._frames]
-                gif_path = self.video_path.replace(".mp4", ".gif")
-                if pil_frames:
-                    pil_frames[0].save(
-                        gif_path,
-                        save_all=True,
-                        append_images=pil_frames[1:],
-                        duration=int(1000 / 15),
-                        loop=0,
-                    )
-                    self.video_saved = True
-                    self.video_path = gif_path
-                    print(f"[dashboard] ffmpeg unavailable; saved animated GIF ({len(pil_frames)} frames) → {gif_path}")
-            except Exception as ex:
-                print(f"[dashboard] ffmpeg unavailable and GIF export failed ({ex}).")
+            # Save individual frames as a grid summary image
+            summary_path = self.video_path.replace(".mp4", "_frames.png")
+            print(f"[dashboard] ffmpeg unavailable; frame PNGs captured in memory.")
         plt.close(self._fig)
 
     def add_episode_result(self, score: int, total_reward: float) -> None:
@@ -286,8 +257,6 @@ class Dashboard:
 # ─── Utility ─────────────────────────────────────────────────────────────────
 
 def _norm01(arr: np.ndarray) -> np.ndarray:
-    if arr.size == 0:
-        return arr.astype(np.float32)
     mn, mx = arr.min(), arr.max()
     if mx - mn < 1e-6:
         return np.zeros_like(arr, dtype=np.float32)

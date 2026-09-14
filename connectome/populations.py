@@ -148,8 +148,9 @@ def identify_populations(neuron_df: pd.DataFrame) -> CircuitPopulations:
     pop.frontal_vpns = idx(type_match(frontal_vp_types))
 
     # ── Descending neurons ────────────────────────────────────────────────
-    # Matches 'descending_neuron', 'cb-descending', 'descending', etc.
-    is_dn = neuron_df["superclass"].fillna("").str.lower().str.contains("descending")
+    is_dn = neuron_df["superclass"].fillna("").str.lower().str.contains(
+        "^descending$|cb-descending|central_descending"
+    )
     pop.dns_all = idx(is_dn)
 
     pop.dng13 = idx(type_match(["DNg13", "Dng13"]))   # coarse steering
@@ -170,15 +171,13 @@ def identify_populations(neuron_df: pd.DataFrame) -> CircuitPopulations:
     )
 
     # ── Kenyon cells (MB) ─────────────────────────────────────────────────
-    # superclass: 'cb_intrinsic' or 'cb-intrinsic', type starting with 'KC' or class containing 'Kenyon'
-    sc_clean = neuron_df["superclass"].fillna("").str.lower()
-    t_clean  = neuron_df["type"].fillna("")
-    c_clean  = neuron_df["class"].fillna("").str.lower()
+    # superclass = 'cb-intrinsic', class contains 'Kenyon' or 'KCa' etc.
     is_kc = (
-        (sc_clean.str.contains("cb_intrinsic|cb-intrinsic"))
-        & (
-            t_clean.str.startswith("KC")
-            | c_clean.str.contains(r"kenyon|kca|kcg|kc[_\s]", regex=True)
+        neuron_df["superclass"].fillna("").str.lower().str.contains(
+            CFG.MB_SUPERCLASS.lower()
+        )
+        & neuron_df["class"].fillna("").str.lower().str.contains(
+            "kenyon|kca|kcg|kc[_\\s]", regex=True
         )
     )
     pop.kenyon_cells = idx(is_kc)

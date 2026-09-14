@@ -52,7 +52,6 @@ class SensoryEncoder:
 
         # Pre-allocate reusable I_ext tensor (zero-fill each step)
         self._I_ext = torch.zeros(N, dtype=torch.float32, device=device)
-        self._photo_t = torch.as_tensor(photo_idx, dtype=torch.long, device=device)
 
     # ── Map building ─────────────────────────────────────────────────────
 
@@ -105,10 +104,6 @@ class SensoryEncoder:
         -------
         I_ext : torch.Tensor [N] on self.device
         """
-        if self.n_photo == 0:
-            self._I_ext.zero_()
-            return self._I_ext
-
         H, W = frame_gray.shape
         az_lo, az_hi = CFG.VISUAL_AZ_RANGE
         el_lo, el_hi = CFG.VISUAL_EL_RANGE
@@ -128,8 +123,9 @@ class SensoryEncoder:
 
         # Zero out the I_ext buffer, then fill photoreceptor slots
         self._I_ext.zero_()
-        lum_t = torch.from_numpy(luminance.astype(np.float32)).to(self.device)
-        self._I_ext.scatter_(0, self._photo_t, lum_t)
+        photo_t = torch.from_numpy(self.photo_idx).long().to(self.device)
+        lum_t   = torch.from_numpy(luminance.astype(np.float32)).to(self.device)
+        self._I_ext.scatter_(0, photo_t, lum_t)
 
         return self._I_ext
 
@@ -176,10 +172,7 @@ class SensoryEncoder:
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _norm01(arr: np.ndarray) -> np.ndarray:
-    if arr.size == 0:
-        return arr.astype(np.float32)
     mn, mx = arr.min(), arr.max()
     if mx - mn < 1e-6:
-        return np.zeros_like(arr, dtype=np.float32)
-    return ((arr - mn) / (mx - mn)).astype(np.float32)
-
+        return np.zeros_like(arr)
+    return (arr - mn) / (mx - mn)

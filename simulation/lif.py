@@ -66,10 +66,6 @@ class LIFEngine:
         self._alpha_m = math.exp(-dt / tau_m)   # membrane decay
         self._alpha_g = math.exp(-dt / tau_g)   # conductance decay
 
-        # Pre-allocate scalar device tensors to eliminate dynamic GPU allocations during step()
-        self._V_reset_t = torch.tensor(self.V_reset, dtype=torch.float32, device=self.device)
-        self._tau_ref_t = torch.tensor(self.tau_ref, dtype=torch.float32, device=self.device)
-
         self.reset()
 
     # ── State management ──────────────────────────────────────────────────
@@ -109,9 +105,7 @@ class LIFEngine:
         # W is [N_post × N_pre]; spikes_prev is [N_pre]
         # Result: [N_post]  (dense)
         spikes_f = self.spikes.float()
-        if self.W.layout == torch.sparse_csr:
-            I_syn = torch.matmul(self.W, spikes_f)
-        elif self.W.is_sparse:
+        if self.W.is_sparse or self.W.layout == torch.sparse_csr:
             I_syn = torch.sparse.mm(self.W, spikes_f.unsqueeze(1)).squeeze(1)
         else:
             I_syn = torch.mv(self.W, spikes_f)
@@ -128,17 +122,17 @@ class LIFEngine:
 
         # ── 4. Refractory mask: clamp V to V_reset during refractory ────
         in_refractory = self.ref > 0.0
-        V_new = torch.where(in_refractory, self._V_reset_t, V_new)
+        V_new = torch.where(in_refractory, torch.tensor(self.V_reset, device=self.device), V_new)
 
         # ── 5. Threshold crossing → spike ───────────────────────────────
         spiked = (V_new >= self.V_thresh) & (~in_refractory)
 
         # ── 6. Reset spiking neurons ─────────────────────────────────────
-        V_new = torch.where(spiked, self._V_reset_t, V_new)
+        V_new = torch.where(spiked, torch.tensor(self.V_reset, device=self.device), V_new)
 
         # ── 7. Update refractory countdown ──────────────────────────────
         self.ref = torch.clamp(self.ref - self.dt, min=0.0)
-        self.ref = torch.where(spiked, self._tau_ref_t, self.ref)
+        self.ref = torch.where(spiked, torch.tensor(self.tau_ref, device=self.device), self.ref)
 
         # ── 8. Store state ───────────────────────────────────────────────
         self.V      = V_new

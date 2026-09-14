@@ -80,15 +80,18 @@ class PPL101Plasticity:
             return
         self._enabled = True
 
-        # ── Eligibility traces & dW on target compute device ──────────────
-        self._rows_t = torch.from_numpy(self._plastic_rows).long().to(device)
-        self._cols_t = torch.from_numpy(self._plastic_cols).long().to(device)
-        self._e_t    = torch.zeros(n_plastic, dtype=torch.float32, device=device)
-        self._dW_t   = torch.zeros(n_plastic, dtype=torch.float32, device=device)
+        # ── Eligibility traces (CPU numpy — updated each step) ──────────
+        self._e = np.zeros(n_plastic, dtype=np.float32)
 
         # ── Sparse weight data (numpy view of W_scipy.data) ─────────────
+        # We accumulate dW here and push to W_scipy.data periodically.
         self._W_scipy = W_scipy
+        self._dW      = np.zeros(n_plastic, dtype=np.float32)
         self._W_data_idx = self._plastic_mask.nonzero()[0]  # into W_scipy.data
+
+        # Row/col arrays for eligibility product computation
+        self._rows_cpu = self._plastic_rows   # post-synaptic neuron index
+        self._cols_cpu = self._plastic_cols   # pre-synaptic neuron index
 
         # DA state
         self._da_signal = 0.0
@@ -105,23 +108,25 @@ class PPL101Plasticity:
     ) -> None:
         """
         Update eligibility traces and accumulate weight delta.
-        Executes purely on-device (CUDA/MPS) with zero host-to-device transfers.
+        Call once per LIF step.
         """
         if not self._enabled:
             return
 
         self._da_signal = da_signal
 
-        # Direct on-device indexing
-        pre_s  = spikes[self._cols_t]   # [n_plastic] bool
-        post_s = spikes[self._rows_t]   # [n_plastic] bool
+        # Get spike values for pre and post neurons (CPU, numpy)
+        spikes_np = spikes.cpu().numpy().astype(np.float32)
+
+        pre_s  = spikes_np[self._cols_cpu]   # [n_plastic]
+        post_s = spikes_np[self._rows_cpu]   # [n_plastic]
 
         # Eligibility trace update: e ← e * decay + pre * post
-        self._e_t = self._e_t * self._alpha_e + (pre_s & post_s).float()
+        self._e *= self._alpha_e
+        self._e += pre_s * post_s
 
         # Accumulate weight delta: dW ← lr * DA * e
-        if da_signal != 0.0:
-            self._dW_t += (self.lr * da_signal) * self._e_t
+        self._dW += self.lr * da_signal * self._e
 
     # ── Episode-end weight application ───────────────────────────────────
 
@@ -129,17 +134,26 @@ class PPL101Plasticity:
         """
         Apply accumulated dW to the weight matrix and return updated W.
         Call at end of each episode.
+
+        Also re-broadcasts the updated scipy CSR → new sparse torch tensor
+        so the LIF engine uses the updated weights next episode.
+
+        Parameters
+        ----------
+        W_t : current torch sparse tensor (the one used by LIFEngine)
+
+        Returns
+        -------
+        W_new : updated torch sparse tensor (same sparsity pattern)
         """
         if not self._enabled:
             return W_t
 
-        target_device = W_t.device if hasattr(W_t, "device") else self.device
-        dW_cpu = self._dW_t.cpu().numpy()
-        dw_norm = float(np.abs(dW_cpu).mean())
+        dw_norm = float(np.abs(self._dW).mean())
         self.episode_dw_norm.append(dw_norm)
 
-        # Apply and clamp to scipy data
-        self._W_scipy.data[self._W_data_idx] += dW_cpu
+        # Apply and clamp
+        self._W_scipy.data[self._W_data_idx] += self._dW
         np.clip(
             self._W_scipy.data,
             CFG.W_MIN,
@@ -147,12 +161,12 @@ class PPL101Plasticity:
             out=self._W_scipy.data,
         )
 
-        # Reset device accumulators
-        self._dW_t.zero_()
-        self._e_t.zero_()
+        # Reset accumulators
+        self._dW[:] = 0.0
+        self._e[:]  = 0.0
 
-        # Rebuild torch sparse tensor on target device
-        W_new = _scipy_csr_to_torch_sparse(self._W_scipy, target_device)
+        # Rebuild torch sparse tensor from updated scipy data
+        W_new = _scipy_csr_to_torch_sparse(self._W_scipy, self.device)
         return W_new
 
     # ── DA signal helpers ────────────────────────────────────────────────
@@ -185,9 +199,14 @@ class PPL101Plasticity:
         rows_np = W_coo.row.astype(np.int32)
         cols_np = W_coo.col.astype(np.int32)
 
-        relevant = np.concatenate([ppl101_idx, kc_idx])
+        ppl101_set = set(ppl101_idx.tolist())
+        kc_set     = set(kc_idx.tolist())
+        relevant   = ppl101_set | kc_set
 
-        mask = np.isin(rows_np, relevant) | np.isin(cols_np, relevant)
+        mask = np.array([
+            (r in relevant or c in relevant)
+            for r, c in zip(rows_np, cols_np)
+        ], dtype=bool)
 
         return mask, rows_np[mask], cols_np[mask]
 

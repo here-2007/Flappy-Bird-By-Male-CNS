@@ -7,67 +7,16 @@ MaleCNS annotations (Cell 189, 5504-5526).
 """
 
 import os
-from typing import Optional, Union
 import torch
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
-ROOT          = os.environ.get("FLY_BRAIN_ROOT", os.path.dirname(os.path.abspath(__file__)))
-CACHE_DIR     = os.environ.get("FLY_BRAIN_CACHE_DIR", os.path.join(ROOT, "data", "cache"))
-VIDEO_OUT     = os.environ.get("FLY_BRAIN_VIDEO_OUT", os.path.join(ROOT, "fly_plays_flappy.mp4"))
-
-def _resolve_data_path(filename: str) -> str:
-    """
-    Search for connectome dataset files across:
-    1. Direct environment variable (e.g. FLY_BRAIN_NEURONS_CSV, FLY_BRAIN_CONNECTIONS_NPZ)
-    2. Explicit Kaggle dataset input paths:
-       - /kaggle/input/datasets/pernavjain/male-fruit-fly-cns/<filename>
-       - /kaggle/input/male-fruit-fly-cns/<filename>
-    3. Auto-discovery across any /kaggle/input subfolder
-    4. Local cache directory (CACHE_DIR/<filename>)
-    """
-    env_key = f"FLY_BRAIN_{filename.replace('.', '_').upper()}"
-    if env_key in os.environ and os.path.exists(os.environ[env_key]):
-        return os.environ[env_key]
-
-    # Specific Kaggle dataset mount locations
-    kaggle_candidates = [
-        os.path.join("/kaggle/input/datasets/pernavjain/male-fruit-fly-cns", filename),
-        os.path.join("/kaggle/input/male-fruit-fly-cns", filename),
-    ]
-    for path in kaggle_candidates:
-        if os.path.exists(path):
-            return path
-
-    # Auto-discovery if running on Kaggle
-    if os.path.exists("/kaggle/input"):
-        try:
-            for root_dir, _, files in os.walk("/kaggle/input"):
-                if filename in files:
-                    return os.path.join(root_dir, filename)
-        except Exception:
-            pass
-
-    # Default project cache location
-    return os.path.join(CACHE_DIR, filename)
-
-NEURON_CSV    = _resolve_data_path("neurons.csv")
-CONN_NPZ      = _resolve_data_path("connections.npz")
-
-def _resolve_weights_path() -> str:
-    """Ensure weights checkpoint path is writable (Kaggle /kaggle/input is read-only)."""
-    if "FLY_BRAIN_WEIGHTS_PATH" in os.environ:
-        return os.environ["FLY_BRAIN_WEIGHTS_PATH"]
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        test_file = os.path.join(CACHE_DIR, ".write_test")
-        with open(test_file, "w") as f:
-            f.write("ok")
-        os.remove(test_file)
-        return os.path.join(CACHE_DIR, "trained_weights.pt")
-    except Exception:
-        return os.path.join(ROOT, "trained_weights.pt")
-
-WEIGHTS_PATH  = _resolve_weights_path()
+ROOT          = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR     = os.path.join(ROOT, "data", "cache")
+NEURON_CSV    = os.path.join(CACHE_DIR, "neurons.csv")
+CONN_NPZ      = os.path.join(CACHE_DIR, "connections.npz")
+WEIGHTS_PATH  = os.path.join(CACHE_DIR, "trained_weights.pt")
+VIDEO_OUT     = os.path.join(ROOT, "fly_plays_flappy.mp4")
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ─── neuPrint ────────────────────────────────────────────────────────────────
 NEUPRINT_SERVER  = "https://neuprint.janelia.org"
@@ -143,69 +92,21 @@ W_MIN = -2.0
 LIF_STEPS_PER_FRAME = 5    # LIF steps per game frame (5 ms biological window)
 MAX_EPISODES         = 200
 MAX_FRAMES_PER_EP    = 5_000
-VIZ_EVERY_N_FRAMES   = 5    # update dashboard every N frames
+VIZ_EVERY_N_FRAMES   = 30   # update dashboard every N frames
 
 # ─── Device ──────────────────────────────────────────────────────────────────
-def resolve_device(device: Optional[Union[str, torch.device]] = None) -> torch.device:
-    """
-    Resolve and return a valid torch.device without throwing errors.
-    If device is specified, verifies availability and safely falls back
-    (CUDA -> MPS -> CPU) if the accelerator is not available.
-    """
-    if device is not None:
-        dev_str = str(device).lower().strip()
-        if dev_str.startswith("cuda"):
-            try:
-                if torch.cuda.is_available():
-                    return torch.device(device)
-            except Exception:
-                pass
-        elif dev_str.startswith("mps"):
-            try:
-                if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and torch.backends.mps.is_built():
-                    return torch.device(device)
-            except Exception:
-                pass
-        elif dev_str == "cpu":
-            return torch.device("cpu")
-        else:
-            try:
-                return torch.device(device)
-            except Exception:
-                pass
-
-    # Auto-detection: CUDA > MPS > CPU
-    try:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-    except Exception:
-        pass
-
-    try:
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and torch.backends.mps.is_built():
-            return torch.device("mps")
-    except Exception:
-        pass
-
-    return torch.device("cpu")
-
-
-def get_device(verbose: bool = False) -> torch.device:
+def get_device() -> torch.device:
     """Select best available device. T4 on Kaggle > MPS on M4 > CPU."""
-    dev = resolve_device()
-    if verbose:
-        if dev.type == "cuda":
-            try:
-                name = torch.cuda.get_device_name(0)
-                print(f"[device] CUDA: {name}")
-            except Exception:
-                print("[device] CUDA")
-        elif dev.type == "mps":
-            print("[device] Apple MPS (M-series)")
-        else:
-            print("[device] CPU — simulation will be slow")
+    if torch.cuda.is_available():
+        dev = torch.device("cuda")
+        name = torch.cuda.get_device_name(0)
+        print(f"[device] CUDA: {name}")
+    elif torch.backends.mps.is_available():
+        dev = torch.device("mps")
+        print("[device] Apple MPS (M-series)")
+    else:
+        dev = torch.device("cpu")
+        print("[device] CPU — simulation will be slow")
     return dev
 
-
 DEVICE = get_device()
-

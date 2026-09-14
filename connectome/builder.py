@@ -52,19 +52,15 @@ def _scipy_to_torch_sparse(
     try:
         # Preferred: CSR is fastest for SpMV on CUDA
         W_t = torch.sparse_csr_tensor(crow, col, val, size=W.shape, dtype=dtype)
-        return W_t.to(device)
+        W_t = W_t.to(device)
     except (RuntimeError, NotImplementedError):
-        pass
-
-    try:
         # Fallback: COO (works on MPS and CPU)
         W_coo = W_scipy.tocoo()
         i = torch.from_numpy(np.vstack([W_coo.row, W_coo.col]).astype(np.int64))
         v = torch.from_numpy(W_coo.data.astype(np.float32))
-        return torch.sparse_coo_tensor(i, v, W.shape, dtype=dtype).to(device)
-    except (RuntimeError, NotImplementedError):
-        # Final fallback: Keep on CPU
-        return torch.sparse_coo_tensor(i, v, W.shape, dtype=dtype).to("cpu")
+        W_t = torch.sparse_coo_tensor(i, v, W.shape, dtype=dtype).to(device)
+
+    return W_t
 
 
 def load_connectome(
@@ -99,7 +95,7 @@ def load_connectome(
 
     # ── 1. Neuron metadata ─────────────────────────────────────────────────
     print("[build] Loading neuron metadata …")
-    df = pd.read_csv(neuron_csv, low_memory=False)
+    df = pd.read_csv(neuron_csv)
     N  = len(df)
     print(f"        {N:,} neurons")
 
