@@ -13,14 +13,61 @@ import torch
 # ─── Paths ──────────────────────────────────────────────────────────────────
 ROOT          = os.environ.get("FLY_BRAIN_ROOT", os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR     = os.environ.get("FLY_BRAIN_CACHE_DIR", os.path.join(ROOT, "data", "cache"))
-NEURON_CSV    = os.path.join(CACHE_DIR, "neurons.csv")
-CONN_NPZ      = os.path.join(CACHE_DIR, "connections.npz")
-WEIGHTS_PATH  = os.path.join(CACHE_DIR, "trained_weights.pt")
 VIDEO_OUT     = os.environ.get("FLY_BRAIN_VIDEO_OUT", os.path.join(ROOT, "fly_plays_flappy.mp4"))
-try:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-except Exception:
-    pass
+
+def _resolve_data_path(filename: str) -> str:
+    """
+    Search for connectome dataset files across:
+    1. Direct environment variable (e.g. FLY_BRAIN_NEURONS_CSV, FLY_BRAIN_CONNECTIONS_NPZ)
+    2. Explicit Kaggle dataset input paths:
+       - /kaggle/input/datasets/pernavjain/male-fruit-fly-cns/<filename>
+       - /kaggle/input/male-fruit-fly-cns/<filename>
+    3. Auto-discovery across any /kaggle/input subfolder
+    4. Local cache directory (CACHE_DIR/<filename>)
+    """
+    env_key = f"FLY_BRAIN_{filename.replace('.', '_').upper()}"
+    if env_key in os.environ and os.path.exists(os.environ[env_key]):
+        return os.environ[env_key]
+
+    # Specific Kaggle dataset mount locations
+    kaggle_candidates = [
+        os.path.join("/kaggle/input/datasets/pernavjain/male-fruit-fly-cns", filename),
+        os.path.join("/kaggle/input/male-fruit-fly-cns", filename),
+    ]
+    for path in kaggle_candidates:
+        if os.path.exists(path):
+            return path
+
+    # Auto-discovery if running on Kaggle
+    if os.path.exists("/kaggle/input"):
+        try:
+            for root_dir, _, files in os.walk("/kaggle/input"):
+                if filename in files:
+                    return os.path.join(root_dir, filename)
+        except Exception:
+            pass
+
+    # Default project cache location
+    return os.path.join(CACHE_DIR, filename)
+
+NEURON_CSV    = _resolve_data_path("neurons.csv")
+CONN_NPZ      = _resolve_data_path("connections.npz")
+
+def _resolve_weights_path() -> str:
+    """Ensure weights checkpoint path is writable (Kaggle /kaggle/input is read-only)."""
+    if "FLY_BRAIN_WEIGHTS_PATH" in os.environ:
+        return os.environ["FLY_BRAIN_WEIGHTS_PATH"]
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        test_file = os.path.join(CACHE_DIR, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        return os.path.join(CACHE_DIR, "trained_weights.pt")
+    except Exception:
+        return os.path.join(ROOT, "trained_weights.pt")
+
+WEIGHTS_PATH  = _resolve_weights_path()
 
 # ─── neuPrint ────────────────────────────────────────────────────────────────
 NEUPRINT_SERVER  = "https://neuprint.janelia.org"
