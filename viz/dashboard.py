@@ -84,11 +84,14 @@ class Dashboard:
         self.video_saved = False
         self._saved_frame_count = 0
         if video_path:
-            try:
-                self._writer = FFMpegWriter(fps=15, metadata={"title": "FlyFlappyBird"})
-                self._writer.setup(self._fig, video_path, dpi=dpi)
-            except Exception as e:
-                print(f"[dashboard] Video writer unavailable ({e}). Saving frames as PNGs.")
+            if FFMpegWriter.isAvailable():
+                try:
+                    self._writer = FFMpegWriter(fps=15, metadata={"title": "FlyFlappyBird"})
+                    self._writer.setup(self._fig, video_path, dpi=dpi)
+                except Exception as e:
+                    print(f"[dashboard] Video writer setup error ({e}). Will export animated GIF.")
+                    self._writer = None
+            else:
                 self._writer = None
 
         # Episode history (for score line)
@@ -232,7 +235,7 @@ class Dashboard:
         try:
             from IPython import get_ipython
             ip = get_ipython()
-            if ip is None or "IPKernelApp" not in getattr(ip, "config", {}):
+            if ip is None or ip.__class__.__name__ != "ZMQInteractiveShell":
                 return
             from IPython.display import display, Image, clear_output
             buf = io.BytesIO()
