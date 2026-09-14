@@ -52,6 +52,8 @@ def parse_args():
     p.add_argument("--structured-encoder", action="store_true",
                    help="Use structured (feature-based) sensory encoder "
                         "instead of full frame rendering")
+    p.add_argument("--device", type=str, default=None,
+                   help="Execution device ('cuda', 'mps', 'cpu', or auto-detect)")
     return p.parse_args()
 
 
@@ -67,23 +69,37 @@ def kaggle_bar(ep: int, total_ep: int, score: int, best: int, fps: float) -> Non
     )
 
 
-def main():
-    args = parse_args()
+def run_simulation(
+    episodes: int = CFG.MAX_EPISODES,
+    mock: bool = False,
+    no_video: bool = False,
+    no_viz: bool = False,
+    viz_interval: int = CFG.VIZ_EVERY_N_FRAMES,
+    save_weights: bool = False,
+    structured_encoder: bool = False,
+    device: Optional[Union[str, torch.device]] = None,
+) -> dict:
+    """
+    Run FlyFlappyBird simulation programmatically.
+    Works seamlessly both in CLI scripts and Kaggle / Jupyter notebooks.
+    """
+    active_device = CFG.resolve_device(device)
 
     print("=" * 60)
     print("  FlyFlappyBird — MaleCNS connectome simulation")
     print("  Berg et al. (2026) Cell 189, 5504–5526")
+    print(f"  Target compute device: {active_device}")
     print("=" * 60)
 
     # ── 1. Load connectome ───────────────────────────────────────────────
-    if args.mock:
+    if mock:
         print("\n[1/5] Loading MOCK connectome …")
         from data.mock_data import get_or_create_mock_connectome
-        W_t, W_scipy, neuron_df, pop, coords = get_or_create_mock_connectome(device=CFG.DEVICE)
+        W_t, W_scipy, neuron_df, pop, coords = get_or_create_mock_connectome(device=active_device)
         N = len(neuron_df)
     else:
         print("\n[1/5] Loading MaleCNS connectome …")
-        W_t, neuron_df, pop, coords = load_connectome(device=CFG.DEVICE)
+        W_t, neuron_df, pop, coords = load_connectome(device=active_device)
         N = len(neuron_df)
 
         # Keep a scipy CSR copy for in-place plasticity updates
@@ -99,19 +115,19 @@ def main():
     # ── 2. Initialise simulation components ──────────────────────────────
     print("\n[2/5] Initialising simulation components …")
 
-    engine = LIFEngine(W=W_t, N=N, device=CFG.DEVICE)
+    engine = LIFEngine(W=W_t, N=N, device=active_device)
 
     encoder = SensoryEncoder(
         photo_idx   = pop.photoreceptors_R1_R6,
         soma_coords = coords,
         N           = N,
-        device      = CFG.DEVICE,
+        device      = active_device,
     )
 
     decoder = MotorDecoder(
         wing_motor_idx = pop.wing_motor,
         N              = N,
-        device         = CFG.DEVICE,
+        device         = active_device,
     )
 
     plasticity = PPL101Plasticity(
@@ -119,15 +135,15 @@ def main():
         ppl101_idx = pop.ppl101,
         kc_idx     = pop.kenyon_cells,
         N          = N,
-        device     = CFG.DEVICE,
+        device     = active_device,
     )
 
     game = FlappyBird()
 
     # ── 3. Dashboard ─────────────────────────────────────────────────────
     print("\n[3/5] Setting up dashboard …")
-    video_path = None if (args.no_video or args.no_viz) else CFG.VIDEO_OUT
-    dashboard  = None if args.no_viz  else Dashboard(
+    video_path = None if (no_video or no_viz) else CFG.VIDEO_OUT
+    dashboard  = None if no_viz else Dashboard(
         coords     = coords,
         pop        = pop,
         video_path = video_path,
@@ -140,19 +156,19 @@ def main():
         engine.reset()
         engine.clear_spike_accumulator()
         for _ in range(CFG.LIF_STEPS_PER_FRAME):
-            I_noise = torch.randn(N, device=CFG.DEVICE) * 0.05
+            I_noise = torch.randn(N, device=active_device) * 0.05
             engine.step(I_noise)
         rates = engine.spike_rates(pop.wing_motor)
         observed_rates.extend(rates.tolist())
     decoder.calibrate_threshold(observed_rates)
 
     # ── 5. Main training loop ─────────────────────────────────────────────
-    print(f"\n[5/5] Training loop — {args.episodes} episodes …\n")
+    print(f"\n[5/5] Training loop — {episodes} episodes …\n")
     best_score  = 0
     episode     = 0
     da_signal   = 0.0
 
-    for episode in range(1, args.episodes + 1):
+    for episode in range(1, episodes + 1):
         game.reset(seed=episode)
         engine.reset()
         total_reward  = 0.0
@@ -166,7 +182,7 @@ def main():
             frame_gray, frame_rgb = game.render()
 
             # ── Sensory encoding → I_ext ─────────────────────────────────
-            if args.structured_encoder:
+            if structured_encoder:
                 s = game.state
                 I_ext = encoder.encode_structured(
                     bird_y     = s.bird_y_norm,
@@ -197,7 +213,7 @@ def main():
 
             # ── Dashboard update ──────────────────────────────────────────
             should_update_viz = dashboard and (
-                frame_count % args.viz_interval == 0 or not game.state.alive or frame_count == 1
+                frame_count % viz_interval == 0 or not game.state.alive or frame_count == 1
             )
             if should_update_viz:
                 dashboard.update(
@@ -238,12 +254,12 @@ def main():
             dashboard.add_episode_result(score, total_reward)
 
         # Save weights checkpoint
-        if args.save_weights:
+        if save_weights:
             torch.save(W_scipy.data, CFG.WEIGHTS_PATH)
 
         # Progress
         fps = frame_count / max(time.time() - t_ep_start, 1e-6)
-        kaggle_bar(episode, args.episodes, score, best_score, fps)
+        kaggle_bar(episode, episodes, score, best_score, fps)
 
         if episode % 10 == 0:
             dw = plasticity.episode_dw_norm[-10:] if len(plasticity.episode_dw_norm) >= 10 else []
@@ -259,15 +275,37 @@ def main():
     if dashboard:
         dashboard.close()
 
-    if dashboard and getattr(dashboard, "video_saved", False):
-        print(f"[done] Video: {video_path}")
-    elif args.no_viz:
+    final_video = dashboard.video_path if (dashboard and getattr(dashboard, "video_saved", False)) else None
+    if final_video:
+        print(f"[done] Video: {final_video}")
+    elif no_viz:
         print("[done] Video: not saved (disabled by --no-viz)")
-    elif args.no_video:
+    elif no_video:
         print("[done] Video: not saved (disabled by --no-video)")
     else:
         print(f"[done] Video: not saved")
-    print(f"[done] Weights: {CFG.WEIGHTS_PATH if args.save_weights else 'not saved'}")
+    print(f"[done] Weights: {CFG.WEIGHTS_PATH if save_weights else 'not saved'}")
+
+    return {
+        "best_score": best_score,
+        "episodes": episode,
+        "video_path": final_video,
+        "weights_path": CFG.WEIGHTS_PATH if save_weights else None,
+    }
+
+
+def main():
+    args = parse_args()
+    run_simulation(
+        episodes=args.episodes,
+        mock=args.mock,
+        no_video=args.no_video,
+        no_viz=args.no_viz,
+        viz_interval=args.viz_interval,
+        save_weights=args.save_weights,
+        structured_encoder=args.structured_encoder,
+        device=args.device,
+    )
 
 
 if __name__ == "__main__":

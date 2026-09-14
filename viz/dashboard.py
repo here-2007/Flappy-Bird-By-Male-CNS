@@ -255,9 +255,24 @@ class Dashboard:
             else:
                 print(f"[dashboard] Warning: 0 frames recorded. Video not created.")
         elif self._frames and self.video_path:
-            # Save individual frames as a grid summary image
-            summary_path = self.video_path.replace(".mp4", "_frames.png")
-            print(f"[dashboard] ffmpeg unavailable; frame PNGs captured in memory.")
+            # Fallback for environments without ffmpeg (e.g. basic Kaggle containers)
+            try:
+                from PIL import Image as PILImage
+                pil_frames = [PILImage.open(io.BytesIO(b)) for b in self._frames]
+                gif_path = self.video_path.replace(".mp4", ".gif")
+                if pil_frames:
+                    pil_frames[0].save(
+                        gif_path,
+                        save_all=True,
+                        append_images=pil_frames[1:],
+                        duration=int(1000 / 15),
+                        loop=0,
+                    )
+                    self.video_saved = True
+                    self.video_path = gif_path
+                    print(f"[dashboard] ffmpeg unavailable; saved animated GIF ({len(pil_frames)} frames) → {gif_path}")
+            except Exception as ex:
+                print(f"[dashboard] ffmpeg unavailable and GIF export failed ({ex}).")
         plt.close(self._fig)
 
     def add_episode_result(self, score: int, total_reward: float) -> None:

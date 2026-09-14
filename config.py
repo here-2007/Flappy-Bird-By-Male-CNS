@@ -11,13 +11,16 @@ from typing import Optional, Union
 import torch
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
-ROOT          = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR     = os.path.join(ROOT, "data", "cache")
+ROOT          = os.environ.get("FLY_BRAIN_ROOT", os.path.dirname(os.path.abspath(__file__)))
+CACHE_DIR     = os.environ.get("FLY_BRAIN_CACHE_DIR", os.path.join(ROOT, "data", "cache"))
 NEURON_CSV    = os.path.join(CACHE_DIR, "neurons.csv")
 CONN_NPZ      = os.path.join(CACHE_DIR, "connections.npz")
 WEIGHTS_PATH  = os.path.join(CACHE_DIR, "trained_weights.pt")
-VIDEO_OUT     = os.path.join(ROOT, "fly_plays_flappy.mp4")
-os.makedirs(CACHE_DIR, exist_ok=True)
+VIDEO_OUT     = os.environ.get("FLY_BRAIN_VIDEO_OUT", os.path.join(ROOT, "fly_plays_flappy.mp4"))
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except Exception:
+    pass
 
 # ─── neuPrint ────────────────────────────────────────────────────────────────
 NEUPRINT_SERVER  = "https://neuprint.janelia.org"
