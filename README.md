@@ -72,16 +72,34 @@ Or install manually:
 
 ## Quick Start
 
-### Mock mode (no neuPrint account needed)
-
+```bash
 # Run with synthetic 600-neuron connectome and record video (fly_plays_flappy.mp4)
 python run.py --mock --episodes 5
 
 # Fast headless benchmark run (no dashboard or video recording)
 python run.py --mock --no-viz --episodes 5
 
+# Target a specific device ('cuda', 'mps', 'cpu')
+python run.py --mock --episodes 5 --device cpu
+
 # With structured (feature-based) sensory encoder
 python run.py --mock --no-viz --episodes 10 --structured-encoder
+```
+
+### Python API (Kaggle & Jupyter Notebooks)
+
+```python
+from run import run_simulation
+
+results = run_simulation(
+    episodes=5,
+    mock=True,
+    no_viz=False,
+    viz_interval=5,
+    device="cuda",  # or "mps" or "cpu"
+)
+print("Best score:", results["best_score"])
+print("Video saved to:", results["video_path"])
 ```
 
 ### Real data mode
