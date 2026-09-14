@@ -52,6 +52,7 @@ class SensoryEncoder:
 
         # Pre-allocate reusable I_ext tensor (zero-fill each step)
         self._I_ext = torch.zeros(N, dtype=torch.float32, device=device)
+        self._photo_t = torch.as_tensor(photo_idx, dtype=torch.long, device=device)
 
     # ── Map building ─────────────────────────────────────────────────────
 
@@ -127,9 +128,8 @@ class SensoryEncoder:
 
         # Zero out the I_ext buffer, then fill photoreceptor slots
         self._I_ext.zero_()
-        photo_t = torch.from_numpy(self.photo_idx).long().to(self.device)
-        lum_t   = torch.from_numpy(luminance.astype(np.float32)).to(self.device)
-        self._I_ext.scatter_(0, photo_t, lum_t)
+        lum_t = torch.from_numpy(luminance.astype(np.float32)).to(self.device)
+        self._I_ext.scatter_(0, self._photo_t, lum_t)
 
         return self._I_ext
 
